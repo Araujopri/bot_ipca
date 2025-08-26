@@ -1,0 +1,6 @@
+Solução quando não existe link direto:
+1) RPA (Playwright/Selenium) headless; menus/logins/cliques.
+2) Persistir cookies/tokens; waits explícitos.
+3) Interceptar requests (Playwright) para achar endpoint do download.
+4) Retry/timeouts/screenshots/logs; captcha com passo assistido.
+5) Orquestração: cron/ADF; landing->transform->Parquet.
