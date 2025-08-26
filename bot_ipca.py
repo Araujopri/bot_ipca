@@ -8,8 +8,8 @@ from typing import List, Dict
 import pandas as pd, requests
 
 SIDRA_URLS = [
-    "https://apisidra.ibge.gov.br/values/t/1737/n1/all/p/last%20120?formato=json",
-    "https://apisidra.ibge.gov.br/values/t/1737/n1/all/p/all?formato=json",
+    "https://apisidra.ibge.gov.br/values/t/1737/n1/all/v/all/p/last%20120?formato=json",
+    "https://apisidra.ibge.gov.br/values/t/1737/n1/all/v/all/p/all?formato=json",
     "https://sidra.ibge.gov.br/Ajax/JSon/Tabela/1/1737?versao=-1",
 ]
 
@@ -39,6 +39,8 @@ def fetch_json(url: str):
         import json as _j; return _j.loads(r.text)
 
 def fetch_json_with_fallback():
+    import logging
+
     last_err=None
     for u in SIDRA_URLS:
         try: return fetch_json(u)
@@ -50,25 +52,79 @@ def load_fixture(path: Path) -> List[Dict]:
     logging.info("Carregando fixture local: %s", path)
     with open(path,"r",encoding="utf-8") as f: return json.load(f)
 
+
 def normalize_ipca(payload) -> pd.DataFrame:
-    if isinstance(payload, list) and len(payload)>1 and isinstance(payload[1], dict):
-        regs=[]
+    import logging
+
+    """
+    Normaliza resposta da API v2 (lista em que o item 0 é o cabeçalho).
+    Faz parsing do período usando D3C (AAAAMM) ou D3N ('jan/2025', etc).
+    """
+    import pandas as pd, re
+
+    mes_pt = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
+              "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+
+    def parse_period(item):
+        # 1) AAAAMM direto (D3C / D4C / D5C) ou 1994-01 / 1994.01
+        for k in ("D3C","D4C","D5C"):
+            v = str(item.get(k) or "")
+            if len(v) == 6 and v.isdigit():
+                return int(v[:4]), int(v[4:6])
+            m = re.match(r"^(\d{4})[-/.](\d{2})$", v)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+
+        # 2) 'jan/2025' (D3N / D4N / D5N)
+        for k in ("D3N","D4N","D5N"):
+            v = str(item.get(k) or "").strip().lower()
+            m = re.match(r"^(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[/\- ](\d{4})$", v)
+            if m:
+                return int(m.group(2)), mes_pt[m.group(1)]
+
+        return None, None
+
+    # Formato API v2 (lista)
+    if isinstance(payload, list) and isinstance(payload[0], dict):
+        if len(payload) <= 1:
+            logging.warning('Payload só com cabeçalho (len=1). Verifique parâmetros v/p na URL.');
+            return pd.DataFrame(columns=['ano','mes','localidade_codigo','localidade','indice','unidade','valor'])
+        # len>1: tem dados
+        regs = []
         for item in payload[1:]:
-            period=str(item.get("D3C") or "")
-            ano=int(period[:4]) if period[:4].isdigit() else None
-            mes=int(period[4:6]) if len(period)>=6 and period[4:6].isdigit() else None
-            v=item.get("V")
-            if isinstance(v,str): v=v.replace(",", ".")
-            try: valor=float(v)
-            except: valor=None
-            regs.append({"ano":ano,"mes":mes,"localidade_codigo":item.get("D1C") or "1",
-                         "localidade":item.get("D1N") or "Brasil","indice":"IPCA","unidade":"%","valor":valor})
-        import pandas as pd
-        df=pd.DataFrame(regs).sort_values(["ano","mes"]).reset_index(drop=True)
+            ano, mes = parse_period(item)
+
+            v = item.get("V")
+            if isinstance(v, str):
+                v = v.replace(",", ".")
+            try:
+                valor = float(v)
+            except Exception:
+                valor = None
+
+            regs.append({
+                "ano": ano,
+                "mes": mes,
+                "localidade_codigo": item.get("D1C") or "1",
+                "localidade": item.get("D1N") or "Brasil",
+                "indice": "IPCA",
+                "unidade": "%",
+                "valor": valor,
+            })
+
+        df = pd.DataFrame(regs)
+        df = df.dropna(subset=["ano","mes"])
+        if not df.empty:
+            df["ano"] = df["ano"].astype(int)
+            df["mes"] = df["mes"].astype(int)
+            df = df.sort_values(["ano","mes"]).reset_index(drop=True)
         return df[["ano","mes","localidade_codigo","localidade","indice","unidade","valor"]]
-    import pandas as pd
-    try: return pd.json_normalize(payload)
-    except Exception: return pd.DataFrame()
+
+    # Fallback
+    try:
+        return pd.json_normalize(payload)
+    except Exception:
+        return pd.DataFrame()
 
 def save_parquet(df, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
